@@ -37,6 +37,7 @@ type Server struct {
 	key     string
 	handler Handler
 	logger  *log.Logger
+	ctx     context.Context // set in Listen; derived per-connection for handler
 }
 
 // New creates a TLS SMTP server bound to addr. cert/key are CA-signed
@@ -65,6 +66,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	defer ln.Close()
 
 	s.logger.Printf("smtp: listening on %s (TLS)", s.addr)
+	s.ctx = ctx
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -86,6 +88,11 @@ func (s *Server) Listen(ctx context.Context) error {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+	// Derive a per-connection context from the server lifetime ctx, with a
+	// 60s timeout matching the connection deadline. This scopes the handler's
+	// cancellation to this connection instead of using context.Background().
+	ctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
+	defer cancel()
 
 	tp := textproto.NewConn(conn)
 	if err := tp.PrintfLine("220 support.harmonicr.com ESMTP ready"); err != nil {
@@ -149,7 +156,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = tp.PrintfLine("550 rejected")
 		return
 	}
-	if err := s.handler(context.Background(), e); err != nil {
+	if err := s.handler(ctx, e); err != nil {
 		s.logger.Printf("smtp: handler: %v", err)
 		_ = tp.PrintfLine("550 rejected")
 		return

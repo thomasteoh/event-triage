@@ -36,7 +36,7 @@ type Server struct {
 
 // New creates the HTTP server. oidc may be nil (admin surface fails closed).
 func New(addr string, health, ready func() bool, oidc *OIDC, logger *log.Logger) *Server {
-	return &Server{
+	s := &Server{
 		addr:   addr,
 		health: health,
 		ready:  ready,
@@ -44,10 +44,13 @@ func New(addr string, health, ready func() bool, oidc *OIDC, logger *log.Logger)
 		logger: logger,
 		mux:    http.NewServeMux(),
 	}
+	s.register()
+	return s
 }
 
-// Listen starts the HTTP server until ctx is done.
-func (s *Server) Listen(ctx context.Context) error {
+// register wires the routes onto the mux. It is called by New (so routes
+// exist before Listen, and are testable via the mux) and by Listen.
+func (s *Server) register() {
 	s.mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if s.health == nil || !s.health() {
 			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
@@ -64,15 +67,19 @@ func (s *Server) Listen(ctx context.Context) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true})
 	})
-	// Admin surface: fail closed. Without a configured verifier, admin routes
-	// 403 unconditionally.
+	// Admin surface: fail closed. The route is ALWAYS registered; when OIDC
+	// is unconfigured (s.oidc nil or verifier failed) adminGuard 403s, so the
+	// surface is never accidentally open and never silently 404s.
+	s.mux.HandleFunc("/admin", s.adminGuard(s.adminIndex))
+}
+
+// Listen starts the HTTP server until ctx is done.
+func (s *Server) Listen(ctx context.Context) error {
 	if s.oidc != nil && s.oidc.Issuer != "" {
 		if err := s.setupOIDC(); err != nil {
 			s.logger.Printf("server: oidc setup: %v (admin surface fails closed)", err)
 		}
-		s.mux.HandleFunc("/admin", s.adminGuard(s.adminIndex))
 	}
-
 	srv := &http.Server{
 		Addr:              s.addr,
 		Handler:           s.mux,
@@ -82,7 +89,7 @@ func (s *Server) Listen(ctx context.Context) error {
 	}
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()

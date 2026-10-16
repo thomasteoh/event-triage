@@ -93,18 +93,18 @@ func (c *Consumer) connectAndConsume(ctx context.Context) error {
 	}
 	ch, err := conn.Channel()
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("open channel: %w", err)
 	}
 	if err := ch.Qos(c.cfg.Prefetch, 0, false); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("qos: %w", err)
 	}
 	// Declare the queues (idempotent) so the bridge works against a fresh
 	// vhost without manual queue creation.
 	for _, q := range AllQueues {
 		if _, err := ch.QueueDeclare(q, true, false, false, false, nil); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return fmt.Errorf("declare %s: %w", q, err)
 		}
 	}
@@ -113,7 +113,7 @@ func (c *Consumer) connectAndConsume(ctx context.Context) error {
 	for _, q := range AllQueues {
 		d, err := ch.Consume(q, c.cfg.ConsumerTag, false, false, false, false, nil)
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return fmt.Errorf("consume %s: %w", q, err)
 		}
 		// Fan deliveries from all queues into one channel.
