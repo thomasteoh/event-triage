@@ -111,7 +111,11 @@ func (c *Consumer) connectAndConsume(ctx context.Context) error {
 
 	deliveries := make(chan amqp.Delivery)
 	for _, q := range AllQueues {
-		d, err := ch.Consume(q, c.cfg.ConsumerTag, false, false, false, false, nil)
+		// RabbitMQ requires a unique consumer tag per queue on a channel.
+		// Derive one from the configured tag + queue name so reconnects do
+		// not collide with a tag already in use on another queue.
+		tag := fmt.Sprintf("%s-%s", c.cfg.ConsumerTag, q)
+		d, err := ch.Consume(q, tag, false, false, false, false, nil)
 		if err != nil {
 			_ = conn.Close()
 			return fmt.Errorf("consume %s: %w", q, err)
