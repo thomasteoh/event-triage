@@ -6,7 +6,7 @@ go 1.26.9
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/rabbitmq/amqp091-go v1.13.0
+	github.com/rabbitmq/amqp091-go v1.14.0
 )
 
 require (
