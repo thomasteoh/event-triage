@@ -26,9 +26,15 @@ rate limiting so humans see signal, not spam.
 | Server health | `events.health` | `health` | Probe → publisher |
 
 All sources publish the normalized `Event` JSON shape to their queue on the
-existing `messaging` vhost (mq.harmonicr.com). The bridge consumes all four
-queues, runs triage (normalize → dedup → rate-limit), and calls Peppermint's
-public create endpoint over the internal container network.
+bridge's own `messaging` vhost. The bridge consumes all four queues, runs
+triage (normalize → dedup → rate-limit), and calls Peppermint's public create
+endpoint over the internal container network.
+
+> **Broker note:** the bridge uses a **dedicated plain-auth RabbitMQ broker**
+> (`event-triage-rabbitmq`, vhost `messaging`, user `mq`) deployed alongside it
+> on the `zitadel` network. The Zulip broker is OAuth2-only (via Zitadel) and
+> its `rabbitmq_auth_backend_oauth2` plugin forces `auth_backends = [oauth2]`,
+> so a plain backend cannot coexist there. This broker is isolated from Zulip.
 
 ## Build
 
