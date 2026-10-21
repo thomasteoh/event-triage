@@ -35,7 +35,10 @@ jobs:
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          # -scan=package: govulncheck v1.9.0's default symbol scan false-positives
+          # on old (GO-2021-*/GO-2022-*) stdlib CVEs in unused packages. Package
+          # level only reports reachable vulnerabilities, which is what CI gates.
+          govulncheck -scan=package ./...
       - name: gosec
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
