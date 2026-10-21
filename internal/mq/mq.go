@@ -8,7 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,12 +33,106 @@ const (
 // AllQueues lists every queue the bridge consumes.
 var AllQueues = []string{QueueEmail, QueuePipeline, QueueLog, QueueHealth}
 
-// Config holds RabbitMQ connection settings.
+// Config holds RabbitMQ connection settings. The broker URL carries no
+// credentials; authentication uses an OAuth2 JWT fetched from TokenProvider
+// and presented as the SASL PLAIN password.
 type Config struct {
-	URL         string        // amqp://<user>:<pass>@<host>:<port>/<vhost>
-	ConsumerTag string        // e.g. "event-triage"
-	Prefetch    int
-	Reconnect   time.Duration // backoff between reconnect attempts
+	URL          string        // amqp://<host>:<port>/<vhost> (no credentials)
+	ConsumerTag  string        // e.g. "event-triage"
+	Prefetch     int
+	Reconnect    time.Duration // backoff between reconnect attempts
+	TokenProvider TokenProvider // fetches/refreshes the OAuth2 JWT
+}
+
+// TokenProvider supplies an OAuth2 client-credentials JWT for the broker. The
+// JWT is presented as the SASL PLAIN password (RabbitMQ's oauth2 backend reads
+// it from the password field). It must refresh the token when it expires.
+type TokenProvider interface {
+	// Token returns a current, valid JWT. Implementations must refresh it
+	// when it nears expiry so reconnect loops never present a stale token.
+	Token() (string, error)
+}
+
+// OAuthTokenProvider fetches a client-credentials JWT from a Zitadel token
+// endpoint (or any OAuth2 issuer) and caches it until it nears expiry.
+type OAuthTokenProvider struct {
+	ClientID     string
+	ClientSecret string
+	TokenURL     string
+	Scope        string
+	HTTPClient   *http.Client
+
+	mu      sync.Mutex
+	token   string
+	expiry  time.Time
+}
+
+// NewOAuthTokenProvider builds a token provider for the given credentials.
+// The client secret is held in memory only — never logged, never written.
+func NewOAuthTokenProvider(clientID, clientSecret, tokenURL, scope string) *OAuthTokenProvider {
+	return &OAuthTokenProvider{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		TokenURL:     tokenURL,
+		Scope:        scope,
+		HTTPClient:   &http.Client{Timeout: 15 * time.Second},
+	}
+}
+
+// Token returns a valid JWT, fetching and caching one when needed.
+func (p *OAuthTokenProvider) Token() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Refresh when the token is missing or within 60s of expiry.
+	if p.token != "" && time.Now().Before(p.expiry.Add(-60*time.Second)) {
+		return p.token, nil
+	}
+	tok, exp, err := p.fetch()
+	if err != nil {
+		return "", err
+	}
+	p.token = tok
+	p.expiry = exp
+	return tok, nil
+}
+
+func (p *OAuthTokenProvider) fetch() (string, time.Time, error) {
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	form.Set("client_id", p.ClientID)
+	form.Set("client_secret", p.ClientSecret)
+	if p.Scope != "" {
+		form.Set("scope", p.Scope)
+	}
+	req, err := http.NewRequest(http.MethodPost, p.TokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := p.HTTPClient.Do(req)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("fetch token: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("read token response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", time.Time{}, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var tr struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &tr); err != nil {
+		return "", time.Time{}, fmt.Errorf("decode token response: %w", err)
+	}
+	if tr.AccessToken == "" {
+		return "", time.Time{}, fmt.Errorf("token response missing access_token")
+	}
+	exp := time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
+	return tr.AccessToken, exp, nil
 }
 
 // Consumer reads events from the queues and calls handle for each message.
@@ -87,7 +185,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 }
 
 func (c *Consumer) connectAndConsume(ctx context.Context) error {
-	conn, err := amqp.Dial(c.cfg.URL)
+	conn, err := c.dial()
 	if err != nil {
 		return fmt.Errorf("dial rabbitmq: %w", err)
 	}
@@ -172,12 +270,14 @@ func (c *Consumer) process(ctx context.Context, msg amqp.Delivery) error {
 // Publisher publishes an event to a queue. It opens a fresh connection per
 // publish (the bridge publishes parsed emails and test events; low volume).
 type Publisher struct {
-	url string
+	url           string
+	tokenProvider TokenProvider
 }
 
-// NewPublisher creates a Publisher for the given broker URL.
-func NewPublisher(url string) *Publisher {
-	return &Publisher{url: url}
+// NewPublisher creates a Publisher for the given broker URL and token provider.
+// The token provider supplies the OAuth2 JWT used as the SASL PLAIN password.
+func NewPublisher(url string, tokenProvider TokenProvider) *Publisher {
+	return &Publisher{url: url, tokenProvider: tokenProvider}
 }
 
 // Publish sends an event to the named queue. It fails closed on any error.
@@ -185,7 +285,15 @@ func (p *Publisher) Publish(ctx context.Context, queue string, e triage.Event) e
 	if err := e.Normalize(); err != nil {
 		return fmt.Errorf("publish normalize: %w", err)
 	}
-	conn, err := amqp.Dial(p.url)
+	tok, err := p.tokenProvider.Token()
+	if err != nil {
+		return fmt.Errorf("fetch oauth token: %w", err)
+	}
+	conn, err := amqp.DialConfig(p.url, amqp.Config{
+		SASL: []amqp.Authentication{
+			&amqp.PlainAuth{Username: tok, Password: tok},
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("dial rabbitmq: %w", err)
 	}
@@ -212,6 +320,21 @@ func (p *Publisher) Publish(ctx context.Context, queue string, e triage.Event) e
 		return fmt.Errorf("publish %s: %w", queue, err)
 	}
 	return nil
+}
+
+// dial opens a RabbitMQ connection authenticated with an OAuth2 JWT. The JWT
+// is fetched from the token provider and presented as the SASL PLAIN password
+// (RabbitMQ's oauth2 backend reads the token from the password field).
+func (c *Consumer) dial() (*amqp.Connection, error) {
+	tok, err := c.cfg.TokenProvider.Token()
+	if err != nil {
+		return nil, fmt.Errorf("fetch oauth token: %w", err)
+	}
+	return amqp.DialConfig(c.cfg.URL, amqp.Config{
+		SASL: []amqp.Authentication{
+			&amqp.PlainAuth{Username: tok, Password: tok},
+		},
+	})
 }
 
 func (c *Consumer) close() {

@@ -14,6 +14,7 @@ func TestLoadMissingRequired(t *testing.T) {
 		"EVENT_TRIAGE_PREFETCH", "EVENT_TRIAGE_RECONNECT", "EVENT_TRIAGE_SMTP_ADDR",
 		"EVENT_TRIAGE_PEPPERMINT_USER", "EVENT_TRIAGE_DEDUP_WINDOW", "EVENT_TRIAGE_RATE_DAY",
 		"EVENT_TRIAGE_LISTEN_ADDR", "EVENT_TRIAGE_PEPPERMINT_KEY",
+		"EVENT_TRIAGE_RABBITMQ_CLIENT_ID", "EVENT_TRIAGE_RABBITMQ_CLIENT_SECRET", "EVENT_TRIAGE_RABBITMQ_TOKEN_URL",
 	} {
 		os.Unsetenv(k)
 	}
@@ -24,10 +25,13 @@ func TestLoadMissingRequired(t *testing.T) {
 }
 
 func TestLoadDefaults(t *testing.T) {
-	os.Setenv("EVENT_TRIAGE_RABBITMQ_URL", "amqp://mq:pw@rabbitmq-mq:5672/messaging")
+	os.Setenv("EVENT_TRIAGE_RABBITMQ_URL", "amqp://event-triage-rabbitmq:5672/messaging")
 	os.Setenv("EVENT_TRIAGE_SMTP_TLS_CERT", "/certs/tls.crt")
 	os.Setenv("EVENT_TRIAGE_SMTP_TLS_KEY", "/certs/tls.key")
 	os.Setenv("EVENT_TRIAGE_PEPPERMINT_URL", "http://peppermint:5003")
+	os.Setenv("EVENT_TRIAGE_RABBITMQ_CLIENT_ID", "event-triage-mq")
+	os.Setenv("EVENT_TRIAGE_RABBITMQ_CLIENT_SECRET", "test-secret")
+	os.Setenv("EVENT_TRIAGE_RABBITMQ_TOKEN_URL", "https://auth.harmonicr.com/oauth/v2/token")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)

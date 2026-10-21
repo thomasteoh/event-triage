@@ -70,12 +70,17 @@ func run(httpAddr, smtpOverride string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// RabbitMQ consumer: every event → triage → ticket.
+	// RabbitMQ consumer: every event → triage → ticket. Auth is OAuth2: a
+	// client-credentials JWT is fetched from Zitadel and presented as the
+	// SASL PLAIN password (no plain password in the URL or env).
+	tokenProvider := mq.NewOAuthTokenProvider(
+		cfg.RabbitMQClientID, cfg.RabbitMQClientSecret, cfg.RabbitMQTokenURL, cfg.RabbitMQTokenScope)
 	mqCfg := mq.Config{
-		URL:         cfg.RabbitMQURL,
-		ConsumerTag: cfg.ConsumerTag,
-		Prefetch:    cfg.Prefetch,
-		Reconnect:   cfg.Reconnect,
+		URL:           cfg.RabbitMQURL,
+		ConsumerTag:   cfg.ConsumerTag,
+		Prefetch:      cfg.Prefetch,
+		Reconnect:     cfg.Reconnect,
+		TokenProvider: tokenProvider,
 	}
 	consumer := mq.NewConsumer(mqCfg, func(ctx context.Context, e triage.Event) error {
 		dec, err := engine.Evaluate(&e)

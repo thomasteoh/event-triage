@@ -13,12 +13,22 @@ import (
 
 // Config is the full bridge configuration, loaded from environment variables.
 type Config struct {
-	// RabbitMQ (existing mq.harmonicr.com broker, vhost "messaging").
-	RabbitMQURL  string // amqp://mq:<password>@rabbitmq-mq:5672/messaging
+	// RabbitMQ (event-triage broker, vhost "messaging"). The URL carries no
+	// credentials; auth is via an OAuth2 JWT presented as the SASL PLAIN
+	// password (see OAuth fields below).
+	RabbitMQURL  string // amqp://event-triage-rabbitmq:5672/messaging
 	QueuePrefix  string // queue name prefix, e.g. "events"
 	ConsumerTag  string
 	Prefetch     int
 	Reconnect    time.Duration // reconnect backoff between attempts
+
+	// OAuth2 client-credentials (Zitadel). The bridge fetches a JWT from the
+	// token endpoint and presents it as the RabbitMQ SASL PLAIN password.
+	// The client secret is read from env only — never committed, never logged.
+	RabbitMQClientID     string // e.g. "event-triage-mq"
+	RabbitMQClientSecret string // Zitadel machine-user secret (env only)
+	RabbitMQTokenURL     string // e.g. "https://auth.harmonicr.com/oauth/v2/token"
+	RabbitMQTokenScope   string // space-separated scopes requested for the JWT
 
 	// SMTP listener (inbound support mail from Google Workspace routing).
 	SMTPListenAddr string // e.g. ":5225" (TLS)
@@ -43,7 +53,11 @@ type Config struct {
 // with an empty config.
 func Load() (*Config, error) {
 	cfg := &Config{
-		RabbitMQURL:   os.Getenv("EVENT_TRIAGE_RABBITMQ_URL"),
+		RabbitMQURL:        os.Getenv("EVENT_TRIAGE_RABBITMQ_URL"),
+		RabbitMQClientID:   os.Getenv("EVENT_TRIAGE_RABBITMQ_CLIENT_ID"),
+		RabbitMQClientSecret: os.Getenv("EVENT_TRIAGE_RABBITMQ_CLIENT_SECRET"),
+		RabbitMQTokenURL:   getenv("EVENT_TRIAGE_RABBITMQ_TOKEN_URL", "https://auth.harmonicr.com/oauth/v2/token"),
+		RabbitMQTokenScope: getenv("EVENT_TRIAGE_RABBITMQ_TOKEN_SCOPE", "openid profile email urn:zitadel:iam:org:projects:roles urn:zitadel:iam:org:project:id:393153369008505467:aud"),
 		QueuePrefix:   getenv("EVENT_TRIAGE_QUEUE_PREFIX", "events"),
 		ConsumerTag:   getenv("EVENT_TRIAGE_CONSUMER_TAG", "event-triage"),
 		Prefetch:      atoiDefault(getenv("EVENT_TRIAGE_PREFETCH", "10"), 10),
@@ -61,6 +75,12 @@ func Load() (*Config, error) {
 
 	if cfg.RabbitMQURL == "" {
 		return nil, fmt.Errorf("EVENT_TRIAGE_RABBITMQ_URL is required")
+	}
+	if cfg.RabbitMQClientID == "" {
+		return nil, fmt.Errorf("EVENT_TRIAGE_RABBITMQ_CLIENT_ID is required")
+	}
+	if cfg.RabbitMQClientSecret == "" {
+		return nil, fmt.Errorf("EVENT_TRIAGE_RABBITMQ_CLIENT_SECRET is required")
 	}
 	if cfg.SMTPTLSCert == "" || cfg.SMTPTLSKey == "" {
 		return nil, fmt.Errorf("EVENT_TRIAGE_SMTP_TLS_CERT and EVENT_TRIAGE_SMTP_TLS_KEY are required")
