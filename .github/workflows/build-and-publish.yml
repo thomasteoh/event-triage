@@ -34,10 +34,7 @@ jobs:
           staticcheck ./...
       - name: govulncheck
         run: |
-          # Pin a stable release. @latest resolved to v1.9.0 which false-positives
-          # on old (GO-2021-*/GO-2022-*) stdlib CVEs in unused packages during its
-          # symbol scan. Pin v1.1.4 (stable, known-good) to keep CI deterministic.
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
       - name: gosec
         run: |
